@@ -66,3 +66,28 @@ resource "aws_iam_role_policy_attachment" "eks_node_AmazonEC2ContainerRegistryRe
   role       = aws_iam_role.eks_node_role.name
   policy_arn = "arn:aws:iam::aws:policy/AmazonEC2ContainerRegistryReadOnly"
 }
+
+# Policy para permitir que os nos do EKS acessem o bucket S3 de upload
+resource "aws_iam_role_policy" "eks_node_s3_upload_policy" {
+  name = "eks-node-s3-upload-${var.project_identifier}"
+  role = aws_iam_role.eks_node_role.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "s3:PutObject",
+          "s3:GetObject",
+          "s3:DeleteObject",
+          "s3:ListBucket"
+        ]
+        Resource = [
+          aws_s3_bucket.upload_diagramas.arn,
+          "${aws_s3_bucket.upload_diagramas.arn}/*"
+        ]
+      }
+    ]
+  })
+}

@@ -40,11 +40,6 @@ output "upload_listener_arn" {
   value       = aws_lb_listener.upload_listener.arn
 }
 
-output "processamento_listener_arn" {
-  description = "ARN do Listener do Processamento Service"
-  value       = aws_lb_listener.processamento_listener.arn
-}
-
 output "relatorio_listener_arn" {
   description = "ARN do Listener do Relatorio Service"
   value       = aws_lb_listener.relatorio_listener.arn
@@ -54,11 +49,6 @@ output "relatorio_listener_arn" {
 output "upload_target_group_arn" {
   description = "ARN do Target Group do Upload Service"
   value       = aws_lb_target_group.upload_tg.arn
-}
-
-output "processamento_target_group_arn" {
-  description = "ARN do Target Group do Processamento Service"
-  value       = aws_lb_target_group.processamento_tg.arn
 }
 
 output "relatorio_target_group_arn" {
@@ -75,6 +65,16 @@ output "sqs_upload_diagrama_concluido_url" {
 output "sqs_upload_diagrama_concluido_arn" {
   description = "ARN da fila SQS de upload de diagrama concluido"
   value       = aws_sqs_queue.upload_diagrama_concluido.arn
+}
+
+output "sqs_upload_diagrama_rejeitado_url" {
+  description = "URL da fila SQS de upload de diagrama rejeitado"
+  value       = aws_sqs_queue.upload_diagrama_rejeitado.url
+}
+
+output "sqs_upload_diagrama_rejeitado_arn" {
+  description = "ARN da fila SQS de upload de diagrama rejeitado"
+  value       = aws_sqs_queue.upload_diagrama_rejeitado.arn
 }
 
 output "sqs_processamento_diagrama_iniciado_url" {
@@ -107,10 +107,25 @@ output "sqs_processamento_diagrama_erro_arn" {
   value       = aws_sqs_queue.processamento_diagrama_erro.arn
 }
 
+output "sqs_relatorio_solicitar_geracao_url" {
+  description = "URL da fila SQS de solicitacao de geracao de relatorios"
+  value       = aws_sqs_queue.relatorio_solicitar_geracao.url
+}
+
+output "sqs_relatorio_solicitar_geracao_arn" {
+  description = "ARN da fila SQS de solicitacao de geracao de relatorios"
+  value       = aws_sqs_queue.relatorio_solicitar_geracao.arn
+}
+
 # SNS Topic outputs
 output "sns_upload_diagrama_concluido_arn" {
   description = "ARN do topico SNS de upload de diagrama concluido"
   value       = aws_sns_topic.upload_diagrama_concluido.arn
+}
+
+output "sns_upload_diagrama_rejeitado_arn" {
+  description = "ARN do topico SNS de upload de diagrama rejeitado"
+  value       = aws_sns_topic.upload_diagrama_rejeitado.arn
 }
 
 output "sns_processamento_diagrama_iniciado_arn" {
@@ -128,13 +143,18 @@ output "sns_processamento_diagrama_erro_arn" {
   value       = aws_sns_topic.processamento_diagrama_erro.arn
 }
 
+output "sns_relatorio_solicitar_geracao_arn" {
+  description = "ARN do topico SNS de solicitacao de geracao de relatorios"
+  value       = aws_sns_topic.relatorio_solicitar_geracao.arn
+}
+
 # S3 Upload bucket outputs
-output "upload_s3_bucket_name" {
+output "upload_bucket_name" {
   description = "Nome do bucket S3 para upload de diagramas"
   value       = aws_s3_bucket.upload_diagramas.bucket
 }
 
-output "upload_s3_bucket_arn" {
+output "upload_bucket_arn" {
   description = "ARN do bucket S3 para upload de diagramas"
   value       = aws_s3_bucket.upload_diagramas.arn
 }

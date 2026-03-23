@@ -15,6 +15,21 @@ resource "aws_sqs_queue" "upload_diagrama_concluido" {
   }
 }
 
+# Fila para notificacao de upload de diagrama rejeitado (Upload -> Relatorio)
+resource "aws_sqs_queue" "upload_diagrama_rejeitado" {
+  name                       = var.sqs_upload_diagrama_rejeitado_name
+  visibility_timeout_seconds = 120
+  message_retention_seconds  = 86400
+  receive_wait_time_seconds  = 20
+
+  tags = {
+    Name              = var.sqs_upload_diagrama_rejeitado_name
+    ProjectIdentifier = var.project_identifier
+    Service           = "messaging"
+    Environment       = var.environment
+  }
+}
+
 # Fila para notificacao de processamento de diagrama iniciado (Processamento -> Relatorio)
 resource "aws_sqs_queue" "processamento_diagrama_iniciado" {
   name                       = var.sqs_processamento_diagrama_iniciado_name
@@ -60,12 +75,38 @@ resource "aws_sqs_queue" "processamento_diagrama_erro" {
   }
 }
 
+# Fila para solicitacao de geracao de relatorios
+resource "aws_sqs_queue" "relatorio_solicitar_geracao" {
+  name                       = var.sqs_relatorio_solicitar_geracao_name
+  visibility_timeout_seconds = 120
+  message_retention_seconds  = 86400
+  receive_wait_time_seconds  = 20
+
+  tags = {
+    Name              = var.sqs_relatorio_solicitar_geracao_name
+    ProjectIdentifier = var.project_identifier
+    Service           = "messaging"
+    Environment       = var.environment
+  }
+}
+
 # SNS Topics para pub/sub entre microsservicos (MassTransit)
 resource "aws_sns_topic" "upload_diagrama_concluido" {
   name = var.sqs_upload_diagrama_concluido_name
 
   tags = {
     Name              = var.sqs_upload_diagrama_concluido_name
+    ProjectIdentifier = var.project_identifier
+    Service           = "messaging"
+    Environment       = var.environment
+  }
+}
+
+resource "aws_sns_topic" "upload_diagrama_rejeitado" {
+  name = var.sqs_upload_diagrama_rejeitado_name
+
+  tags = {
+    Name              = var.sqs_upload_diagrama_rejeitado_name
     ProjectIdentifier = var.project_identifier
     Service           = "messaging"
     Environment       = var.environment
@@ -105,11 +146,30 @@ resource "aws_sns_topic" "processamento_diagrama_erro" {
   }
 }
 
+resource "aws_sns_topic" "relatorio_solicitar_geracao" {
+  name = var.sqs_relatorio_solicitar_geracao_name
+
+  tags = {
+    Name              = var.sqs_relatorio_solicitar_geracao_name
+    ProjectIdentifier = var.project_identifier
+    Service           = "messaging"
+    Environment       = var.environment
+  }
+}
+
 # Subscriptions SNS -> SQS
 resource "aws_sns_topic_subscription" "upload_diagrama_concluido_to_sqs" {
   topic_arn = aws_sns_topic.upload_diagrama_concluido.arn
   protocol  = "sqs"
   endpoint  = aws_sqs_queue.upload_diagrama_concluido.arn
+
+  raw_message_delivery = true
+}
+
+resource "aws_sns_topic_subscription" "upload_diagrama_rejeitado_to_sqs" {
+  topic_arn = aws_sns_topic.upload_diagrama_rejeitado.arn
+  protocol  = "sqs"
+  endpoint  = aws_sqs_queue.upload_diagrama_rejeitado.arn
 
   raw_message_delivery = true
 }
@@ -138,6 +198,14 @@ resource "aws_sns_topic_subscription" "processamento_diagrama_erro_to_sqs" {
   raw_message_delivery = true
 }
 
+resource "aws_sns_topic_subscription" "relatorio_solicitar_geracao_to_sqs" {
+  topic_arn = aws_sns_topic.relatorio_solicitar_geracao.arn
+  protocol  = "sqs"
+  endpoint  = aws_sqs_queue.relatorio_solicitar_geracao.arn
+
+  raw_message_delivery = true
+}
+
 # Policy na fila SQS para permitir que o SNS envie mensagens
 resource "aws_sqs_queue_policy" "upload_diagrama_concluido_sns_policy" {
   queue_url = aws_sqs_queue.upload_diagrama_concluido.id
@@ -153,6 +221,27 @@ resource "aws_sqs_queue_policy" "upload_diagrama_concluido_sns_policy" {
         Condition = {
           ArnEquals = {
             "aws:SourceArn" = aws_sns_topic.upload_diagrama_concluido.arn
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_sqs_queue_policy" "upload_diagrama_rejeitado_sns_policy" {
+  queue_url = aws_sqs_queue.upload_diagrama_rejeitado.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { Service = "sns.amazonaws.com" }
+        Action    = "sqs:SendMessage"
+        Resource  = aws_sqs_queue.upload_diagrama_rejeitado.arn
+        Condition = {
+          ArnEquals = {
+            "aws:SourceArn" = aws_sns_topic.upload_diagrama_rejeitado.arn
           }
         }
       }
@@ -223,6 +312,27 @@ resource "aws_sqs_queue_policy" "processamento_diagrama_erro_sns_policy" {
   })
 }
 
+resource "aws_sqs_queue_policy" "relatorio_solicitar_geracao_sns_policy" {
+  queue_url = aws_sqs_queue.relatorio_solicitar_geracao.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { Service = "sns.amazonaws.com" }
+        Action    = "sqs:SendMessage"
+        Resource  = aws_sqs_queue.relatorio_solicitar_geracao.arn
+        Condition = {
+          ArnEquals = {
+            "aws:SourceArn" = aws_sns_topic.relatorio_solicitar_geracao.arn
+          }
+        }
+      }
+    ]
+  })
+}
+
 # IAM Policy para acesso ao SQS e SNS pelos pods do EKS
 resource "aws_iam_policy" "sqs_access" {
   name        = "${var.project_identifier}-sqs-access-policy"
@@ -243,9 +353,11 @@ resource "aws_iam_policy" "sqs_access" {
         ]
         Resource = [
           aws_sqs_queue.upload_diagrama_concluido.arn,
+          aws_sqs_queue.upload_diagrama_rejeitado.arn,
           aws_sqs_queue.processamento_diagrama_iniciado.arn,
           aws_sqs_queue.processamento_diagrama_analisado.arn,
-          aws_sqs_queue.processamento_diagrama_erro.arn
+          aws_sqs_queue.processamento_diagrama_erro.arn,
+          aws_sqs_queue.relatorio_solicitar_geracao.arn
         ]
       },
       {
@@ -260,9 +372,11 @@ resource "aws_iam_policy" "sqs_access" {
         ]
         Resource = [
           aws_sns_topic.upload_diagrama_concluido.arn,
+          aws_sns_topic.upload_diagrama_rejeitado.arn,
           aws_sns_topic.processamento_diagrama_iniciado.arn,
           aws_sns_topic.processamento_diagrama_analisado.arn,
-          aws_sns_topic.processamento_diagrama_erro.arn
+          aws_sns_topic.processamento_diagrama_erro.arn,
+          aws_sns_topic.relatorio_solicitar_geracao.arn
         ]
       }
     ]

@@ -16,14 +16,14 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TF_VAR_aws_region: us-east-1
-      TF_VAR_bucket_name: ${{ secrets.TF_VAR_BUCKET_NAME }}
+      TF_VAR_tfstate_bucket_name: ${{ secrets.TF_VAR_TFSTATE_BUCKET_NAME }}
       TF_VAR_eks_iam_user_name: ${{ secrets.TF_VAR_EKS_IAM_USER_NAME }}
       TF_VAR_eks_cluster_name: ${{ secrets.TF_VAR_EKS_CLUSTER_NAME }}
       TF_VAR_eks_node_scaling_desired_size: ${{ secrets.TF_VAR_EKS_NODE_SCALING_DESIRED_SIZE }}
       TF_VAR_eks_node_scaling_max_size: ${{ secrets.TF_VAR_EKS_NODE_SCALING_MAX_SIZE }}
       TF_VAR_eks_node_scaling_min_size: ${{ secrets.TF_VAR_EKS_NODE_SCALING_MIN_SIZE }}
       TF_VAR_new_relic_license_key: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
-      TF_VAR_upload_s3_bucket_name: ${{ secrets.TF_VAR_UPLOAD_S3_BUCKET_NAME }}
+      TF_VAR_upload_bucket_name: ${{ secrets.TF_VAR_UPLOAD_BUCKET_NAME }}
 
     steps:
       - name: Validar confirmação
@@ -62,14 +62,14 @@ jobs:
         working-directory: ./infra
         env:
           TF_VAR_aws_region: ${{ env.AWS_REGION }}
-          TF_VAR_bucket_name: ${{ secrets.TF_VAR_BUCKET_NAME }}
+          TF_VAR_tfstate_bucket_name: ${{ secrets.TF_VAR_TFSTATE_BUCKET_NAME }}
           TF_VAR_eks_iam_user_name: ${{ secrets.TF_VAR_EKS_IAM_USER_NAME }}
           TF_VAR_eks_cluster_name: ${{ secrets.TF_VAR_EKS_CLUSTER_NAME }}
           TF_VAR_eks_node_scaling_desired_size: ${{ secrets.TF_VAR_EKS_NODE_SCALING_DESIRED_SIZE }}
           TF_VAR_eks_node_scaling_max_size: ${{ secrets.TF_VAR_EKS_NODE_SCALING_MAX_SIZE }}
           TF_VAR_eks_node_scaling_min_size: ${{ secrets.TF_VAR_EKS_NODE_SCALING_MIN_SIZE }}
           TF_VAR_new_relic_license_key: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
-          TF_VAR_upload_s3_bucket_name: ${{ secrets.TF_VAR_UPLOAD_S3_BUCKET_NAME }}
+          TF_VAR_upload_bucket_name: ${{ secrets.TF_VAR_UPLOAD_BUCKET_NAME }}
         run: |
           echo "Destruindo recursos específicos (excluindo bucket S3)..."
           
