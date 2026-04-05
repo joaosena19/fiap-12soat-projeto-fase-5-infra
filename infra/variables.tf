@@ -94,9 +94,21 @@ variable "upload_bucket_name" {
 }
 
 variable "sqs_upload_diagrama_concluido_name" {
-  description = "Nome da fila SQS de notificacao de upload de diagrama concluido (Upload -> Processamento)"
+  description = "Nome base do topico SNS de notificacao de upload de diagrama concluido"
   type        = string
   default     = "fase5-upload-diagrama-concluido"
+}
+
+variable "sqs_upload_diagrama_concluido_processamento_name" {
+  description = "Nome da fila SQS dedicada ao Processamento para consumo do topico upload-diagrama-concluido"
+  type        = string
+  default     = "fase5-upload-diagrama-concluido-processamento"
+}
+
+variable "sqs_upload_diagrama_concluido_relatorio_name" {
+  description = "Nome da fila SQS dedicada ao Relatorio para consumo do topico upload-diagrama-concluido"
+  type        = string
+  default     = "fase5-upload-diagrama-concluido-relatorio"
 }
 
 variable "sqs_upload_diagrama_rejeitado_name" {

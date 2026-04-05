@@ -57,14 +57,24 @@ output "relatorio_target_group_arn" {
 }
 
 # SQS Queue outputs
-output "sqs_upload_diagrama_concluido_url" {
-  description = "URL da fila SQS de upload de diagrama concluido"
-  value       = aws_sqs_queue.upload_diagrama_concluido.url
+output "sqs_upload_diagrama_concluido_processamento_url" {
+  description = "URL da fila SQS dedicada ao Processamento para upload-diagrama-concluido"
+  value       = aws_sqs_queue.upload_diagrama_concluido_processamento.url
 }
 
-output "sqs_upload_diagrama_concluido_arn" {
-  description = "ARN da fila SQS de upload de diagrama concluido"
-  value       = aws_sqs_queue.upload_diagrama_concluido.arn
+output "sqs_upload_diagrama_concluido_processamento_arn" {
+  description = "ARN da fila SQS dedicada ao Processamento para upload-diagrama-concluido"
+  value       = aws_sqs_queue.upload_diagrama_concluido_processamento.arn
+}
+
+output "sqs_upload_diagrama_concluido_relatorio_url" {
+  description = "URL da fila SQS dedicada ao Relatorio para upload-diagrama-concluido"
+  value       = aws_sqs_queue.upload_diagrama_concluido_relatorio.url
+}
+
+output "sqs_upload_diagrama_concluido_relatorio_arn" {
+  description = "ARN da fila SQS dedicada ao Relatorio para upload-diagrama-concluido"
+  value       = aws_sqs_queue.upload_diagrama_concluido_relatorio.arn
 }
 
 output "sqs_upload_diagrama_rejeitado_url" {

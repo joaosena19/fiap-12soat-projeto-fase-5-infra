@@ -1,14 +1,32 @@
 # Filas Amazon SQS para messaging entre microsservicos
 
-# Fila para notificacao de upload de diagrama concluido (Upload -> Processamento)
-resource "aws_sqs_queue" "upload_diagrama_concluido" {
-  name                       = var.sqs_upload_diagrama_concluido_name
+# Filas dedicadas para fan-out do topico upload-diagrama-concluido (SNS -> SQS)
+# Cada consumidor tem sua propria fila para receber todas as mensagens do topico
+
+# Fila dedicada ao Processamento para consumo do topico upload-diagrama-concluido
+resource "aws_sqs_queue" "upload_diagrama_concluido_processamento" {
+  name                       = var.sqs_upload_diagrama_concluido_processamento_name
   visibility_timeout_seconds = 120
   message_retention_seconds  = 86400
   receive_wait_time_seconds  = 20
 
   tags = {
-    Name              = var.sqs_upload_diagrama_concluido_name
+    Name              = var.sqs_upload_diagrama_concluido_processamento_name
+    ProjectIdentifier = var.project_identifier
+    Service           = "messaging"
+    Environment       = var.environment
+  }
+}
+
+# Fila dedicada ao Relatorio para consumo do topico upload-diagrama-concluido
+resource "aws_sqs_queue" "upload_diagrama_concluido_relatorio" {
+  name                       = var.sqs_upload_diagrama_concluido_relatorio_name
+  visibility_timeout_seconds = 120
+  message_retention_seconds  = 86400
+  receive_wait_time_seconds  = 20
+
+  tags = {
+    Name              = var.sqs_upload_diagrama_concluido_relatorio_name
     ProjectIdentifier = var.project_identifier
     Service           = "messaging"
     Environment       = var.environment
@@ -157,11 +175,19 @@ resource "aws_sns_topic" "relatorio_solicitar_geracao" {
   }
 }
 
-# Subscriptions SNS -> SQS
-resource "aws_sns_topic_subscription" "upload_diagrama_concluido_to_sqs" {
+# Subscriptions SNS -> SQS (fan-out: upload-diagrama-concluido -> 2 filas)
+resource "aws_sns_topic_subscription" "upload_diagrama_concluido_processamento_to_sqs" {
   topic_arn = aws_sns_topic.upload_diagrama_concluido.arn
   protocol  = "sqs"
-  endpoint  = aws_sqs_queue.upload_diagrama_concluido.arn
+  endpoint  = aws_sqs_queue.upload_diagrama_concluido_processamento.arn
+
+  raw_message_delivery = true
+}
+
+resource "aws_sns_topic_subscription" "upload_diagrama_concluido_relatorio_to_sqs" {
+  topic_arn = aws_sns_topic.upload_diagrama_concluido.arn
+  protocol  = "sqs"
+  endpoint  = aws_sqs_queue.upload_diagrama_concluido_relatorio.arn
 
   raw_message_delivery = true
 }
@@ -207,8 +233,8 @@ resource "aws_sns_topic_subscription" "relatorio_solicitar_geracao_to_sqs" {
 }
 
 # Policy na fila SQS para permitir que o SNS envie mensagens
-resource "aws_sqs_queue_policy" "upload_diagrama_concluido_sns_policy" {
-  queue_url = aws_sqs_queue.upload_diagrama_concluido.id
+resource "aws_sqs_queue_policy" "upload_diagrama_concluido_processamento_sns_policy" {
+  queue_url = aws_sqs_queue.upload_diagrama_concluido_processamento.id
 
   policy = jsonencode({
     Version = "2012-10-17"
@@ -217,7 +243,28 @@ resource "aws_sqs_queue_policy" "upload_diagrama_concluido_sns_policy" {
         Effect    = "Allow"
         Principal = { Service = "sns.amazonaws.com" }
         Action    = "sqs:SendMessage"
-        Resource  = aws_sqs_queue.upload_diagrama_concluido.arn
+        Resource  = aws_sqs_queue.upload_diagrama_concluido_processamento.arn
+        Condition = {
+          ArnEquals = {
+            "aws:SourceArn" = aws_sns_topic.upload_diagrama_concluido.arn
+          }
+        }
+      }
+    ]
+  })
+}
+
+resource "aws_sqs_queue_policy" "upload_diagrama_concluido_relatorio_sns_policy" {
+  queue_url = aws_sqs_queue.upload_diagrama_concluido_relatorio.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect    = "Allow"
+        Principal = { Service = "sns.amazonaws.com" }
+        Action    = "sqs:SendMessage"
+        Resource  = aws_sqs_queue.upload_diagrama_concluido_relatorio.arn
         Condition = {
           ArnEquals = {
             "aws:SourceArn" = aws_sns_topic.upload_diagrama_concluido.arn
@@ -352,7 +399,8 @@ resource "aws_iam_policy" "sqs_access" {
           "sqs:ChangeMessageVisibility"
         ]
         Resource = [
-          aws_sqs_queue.upload_diagrama_concluido.arn,
+          aws_sqs_queue.upload_diagrama_concluido_processamento.arn,
+          aws_sqs_queue.upload_diagrama_concluido_relatorio.arn,
           aws_sqs_queue.upload_diagrama_rejeitado.arn,
           aws_sqs_queue.processamento_diagrama_iniciado.arn,
           aws_sqs_queue.processamento_diagrama_analisado.arn,
