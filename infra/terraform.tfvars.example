@@ -1,5 +1,5 @@
 # Variaveis Obrigatorias
-bucket_name       = "coloque-seu-bucket-aqui"
+tfstate_bucket_name = "coloque-seu-bucket-aqui"
 eks_iam_user_name = "seu-usuario-admin-eks"
 eks_cluster_name  = "eks-cluster-fiap-12soat-fase5"
 
@@ -15,4 +15,4 @@ eks_cluster_name  = "eks-cluster-fiap-12soat-fase5"
 # eks_node_scaling_desired_size = 2
 # eks_node_scaling_max_size     = 3
 # eks_node_scaling_min_size     = 1
-# upload_s3_bucket_name         = "fiap-12soat-fase5-upload-diagramas"
+# upload_bucket_name            = "fiap-12soat-fase5-upload-diagramas"

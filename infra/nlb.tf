@@ -1,8 +1,3 @@
-# Data source para pegar CIDR da VPC
-data "aws_vpc" "main" {
-  id = aws_vpc.vpc_principal.id
-}
-
 # Security Group para o NLB
 resource "aws_security_group" "nlb_sg" {
   name        = "${var.project_identifier}-nlb-sg"
@@ -75,29 +70,6 @@ resource "aws_lb_target_group" "upload_tg" {
   }
 }
 
-# Target Group para Processamento (porta 30085)
-resource "aws_lb_target_group" "processamento_tg" {
-  name        = "${var.project_identifier}-processamento-tg"
-  port        = 30085
-  protocol    = "TCP"
-  vpc_id      = aws_vpc.vpc_principal.id
-  target_type = "instance"
-
-  health_check {
-    enabled             = true
-    healthy_threshold   = 2
-    unhealthy_threshold = 2
-    timeout             = 10
-    interval            = 30
-    protocol            = "TCP"
-    port                = "30085"
-  }
-
-  tags = {
-    Name = "${var.project_identifier}-processamento-tg"
-  }
-}
-
 # Target Group para Relatorio (porta 30086)
 resource "aws_lb_target_group" "relatorio_tg" {
   name        = "${var.project_identifier}-relatorio-tg"
@@ -133,18 +105,6 @@ resource "aws_lb_listener" "upload_listener" {
   }
 }
 
-# Listener do NLB para Processamento (porta 85)
-resource "aws_lb_listener" "processamento_listener" {
-  load_balancer_arn = aws_lb.eks_nlb.arn
-  port              = "85"
-  protocol          = "TCP"
-
-  default_action {
-    type             = "forward"
-    target_group_arn = aws_lb_target_group.processamento_tg.arn
-  }
-}
-
 # Listener do NLB para Relatorio (porta 86)
 resource "aws_lb_listener" "relatorio_listener" {
   load_balancer_arn = aws_lb.eks_nlb.arn
@@ -161,14 +121,6 @@ resource "aws_lb_listener" "relatorio_listener" {
 resource "aws_autoscaling_attachment" "upload_asg_attachment" {
   autoscaling_group_name = aws_eks_node_group.eks_node_group.resources[0].autoscaling_groups[0].name
   lb_target_group_arn    = aws_lb_target_group.upload_tg.arn
-  
-  depends_on = [aws_eks_node_group.eks_node_group]
-}
-
-# ASG attachment para Processamento
-resource "aws_autoscaling_attachment" "processamento_asg_attachment" {
-  autoscaling_group_name = aws_eks_node_group.eks_node_group.resources[0].autoscaling_groups[0].name
-  lb_target_group_arn    = aws_lb_target_group.processamento_tg.arn
   
   depends_on = [aws_eks_node_group.eks_node_group]
 }

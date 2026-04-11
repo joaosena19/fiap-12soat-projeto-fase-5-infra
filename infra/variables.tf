@@ -1,6 +1,6 @@
 # Obrigatorias
-variable "bucket_name" {
-  description = "O nome unico para o bucket S3. Deve ser globalmente unico."
+variable "tfstate_bucket_name" {
+  description = "O nome unico para o bucket S3 do tfstate. Deve ser globalmente unico."
   type        = string
 }
 
@@ -87,16 +87,34 @@ variable "new_relic_license_key" {
   sensitive   = true
 }
 
-variable "upload_s3_bucket_name" {
+variable "upload_bucket_name" {
   description = "Nome do bucket S3 para upload de diagramas."
   type        = string
   default     = "fiap-12soat-fase5-upload-diagramas"
 }
 
 variable "sqs_upload_diagrama_concluido_name" {
-  description = "Nome da fila SQS de notificacao de upload de diagrama concluido (Upload -> Processamento)"
+  description = "Nome base do topico SNS de notificacao de upload de diagrama concluido"
   type        = string
   default     = "fase5-upload-diagrama-concluido"
+}
+
+variable "sqs_upload_diagrama_concluido_processamento_name" {
+  description = "Nome da fila SQS dedicada ao Processamento para consumo do topico upload-diagrama-concluido"
+  type        = string
+  default     = "fase5-upload-diagrama-concluido-processamento"
+}
+
+variable "sqs_upload_diagrama_concluido_relatorio_name" {
+  description = "Nome da fila SQS dedicada ao Relatorio para consumo do topico upload-diagrama-concluido"
+  type        = string
+  default     = "fase5-upload-diagrama-concluido-relatorio"
+}
+
+variable "sqs_upload_diagrama_rejeitado_name" {
+  description = "Nome da fila SQS de notificacao de upload de diagrama rejeitado (Upload -> Relatorio)"
+  type        = string
+  default     = "fase5-upload-diagrama-rejeitado"
 }
 
 variable "sqs_processamento_diagrama_iniciado_name" {
@@ -115,4 +133,10 @@ variable "sqs_processamento_diagrama_erro_name" {
   description = "Nome da fila SQS de notificacao de erro no processamento de diagrama (Processamento -> Relatorio)"
   type        = string
   default     = "fase5-processamento-diagrama-erro"
+}
+
+variable "sqs_relatorio_solicitar_geracao_name" {
+  description = "Nome da fila SQS de solicitacao de geracao de relatorios"
+  type        = string
+  default     = "fase5-relatorio-solicitar-geracao"
 }

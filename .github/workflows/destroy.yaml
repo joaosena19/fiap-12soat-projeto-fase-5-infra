@@ -16,14 +16,14 @@ jobs:
     runs-on: ubuntu-latest
     env:
       TF_VAR_aws_region: us-east-1
-      TF_VAR_bucket_name: ${{ secrets.TF_VAR_BUCKET_NAME }}
+      TF_VAR_tfstate_bucket_name: ${{ secrets.TF_VAR_TFSTATE_BUCKET_NAME }}
       TF_VAR_eks_iam_user_name: ${{ secrets.TF_VAR_EKS_IAM_USER_NAME }}
       TF_VAR_eks_cluster_name: ${{ secrets.TF_VAR_EKS_CLUSTER_NAME }}
       TF_VAR_eks_node_scaling_desired_size: ${{ secrets.TF_VAR_EKS_NODE_SCALING_DESIRED_SIZE }}
       TF_VAR_eks_node_scaling_max_size: ${{ secrets.TF_VAR_EKS_NODE_SCALING_MAX_SIZE }}
       TF_VAR_eks_node_scaling_min_size: ${{ secrets.TF_VAR_EKS_NODE_SCALING_MIN_SIZE }}
       TF_VAR_new_relic_license_key: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
-      TF_VAR_upload_s3_bucket_name: ${{ secrets.TF_VAR_UPLOAD_S3_BUCKET_NAME }}
+      TF_VAR_upload_bucket_name: ${{ secrets.TF_VAR_UPLOAD_BUCKET_NAME }}
 
     steps:
       - name: Validar confirmação
@@ -58,74 +58,36 @@ jobs:
           echo "📋 Recursos gerenciados pelo Terraform:"
           terraform state list
 
-      - name: Destruir recursos específicos (exceto bucket)
+      - name: Esvaziar bucket de uploads
         working-directory: ./infra
-        env:
-          TF_VAR_aws_region: ${{ env.AWS_REGION }}
-          TF_VAR_bucket_name: ${{ secrets.TF_VAR_BUCKET_NAME }}
-          TF_VAR_eks_iam_user_name: ${{ secrets.TF_VAR_EKS_IAM_USER_NAME }}
-          TF_VAR_eks_cluster_name: ${{ secrets.TF_VAR_EKS_CLUSTER_NAME }}
-          TF_VAR_eks_node_scaling_desired_size: ${{ secrets.TF_VAR_EKS_NODE_SCALING_DESIRED_SIZE }}
-          TF_VAR_eks_node_scaling_max_size: ${{ secrets.TF_VAR_EKS_NODE_SCALING_MAX_SIZE }}
-          TF_VAR_eks_node_scaling_min_size: ${{ secrets.TF_VAR_EKS_NODE_SCALING_MIN_SIZE }}
-          TF_VAR_new_relic_license_key: ${{ secrets.NEW_RELIC_LICENSE_KEY }}
-          TF_VAR_upload_s3_bucket_name: ${{ secrets.TF_VAR_UPLOAD_S3_BUCKET_NAME }}
         run: |
-          echo "Destruindo recursos específicos (excluindo bucket S3)..."
-          
-          # Ordem específica de destruição para evitar problemas de dependência
-          DESTROY_ORDER=(
-            "aws_autoscaling_attachment"
-            "aws_lb_listener"
-            "aws_lb_target_group"
-            "aws_lb"
-            "aws_security_group_rule"
-            "helm_release"
-            "aws_iam_role_policy_attachment"
-            "aws_iam_policy"
-            "aws_sns_topic_subscription"
-            "aws_sns_topic"
-            "aws_sqs_queue"
-            "aws_eks_node_group"
-            "aws_eks_access_policy_association"
-            "aws_eks_access_entry"
-            "aws_eks_cluster"
-            "aws_route_table_association"
-            "aws_route_table"
-            "aws_internet_gateway"
-            "aws_subnet"
-            "aws_security_group"
-            "aws_iam_role"
-            "aws_vpc"
-          )
-          
-          # Destruir recursos em ordem específica
-          for resource_type in "${DESTROY_ORDER[@]}"; do
-            RESOURCES=$(terraform state list | grep "^${resource_type}\." || true)
-            if [ -n "$RESOURCES" ]; then
-              echo "Destruindo recursos do tipo: $resource_type"
-              for resource in $RESOURCES; do
-                echo "  -> Destruindo: $resource"
-                terraform destroy -target="$resource" -auto-approve || echo "Falha ao destruir $resource (continuando...)"
-              done
-            fi
-          done
-          
-          # Destruir recursos restantes (exceto bucket S3)
-          REMAINING_RESOURCES=$(terraform state list | grep -v "aws_s3_bucket" || true)
-          if [ -n "$REMAINING_RESOURCES" ]; then
-            echo "Destruindo recursos restantes..."
-            for resource in $REMAINING_RESOURCES; do
-              echo "  -> Destruindo: $resource"
-              terraform destroy -target="$resource" -auto-approve || echo "Falha ao destruir $resource (continuando...)"
-            done
-          fi
+          echo "Esvaziando bucket de uploads..."
+          UPLOAD_BUCKET=$(terraform output -raw upload_bucket_name 2>/dev/null || echo "fiap-12soat-fase5-upload-diagramas")
+          aws s3 rm "s3://${UPLOAD_BUCKET}" --recursive || true
+
+      - name: Remover bucket tfstate do Terraform state
+        working-directory: ./infra
+        run: |
+          echo "Removendo bucket de tfstate do Terraform state (não deleta da AWS)..."
+          terraform state rm aws_s3_bucket.bucket_tfstate || true
+
+      - name: Destruir todos os recursos
+        working-directory: ./infra
+        run: |
+          echo "Destruindo todos os recursos restantes..."
+          terraform destroy -auto-approve
+
+      - name: Re-importar bucket tfstate no state
+        working-directory: ./infra
+        run: |
+          echo "Re-importando bucket de tfstate no Terraform state..."
+          terraform import aws_s3_bucket.bucket_tfstate ${{ secrets.TF_VAR_TFSTATE_BUCKET_NAME }}
 
       - name: Verificar recursos restantes
         working-directory: ./infra
         run: |
-          echo "Recursos restantes após destroy:"
+          echo "📋 Recursos restantes no Terraform state (deve conter apenas o bucket tfstate):"
           terraform state list
 
-      - name: Destruição completa (exceto bucket S3)
-        run: echo "Infraestrutura AWS foi destruída com sucesso (bucket S3 preservado para estado do Terraform)"
+      - name: Destruição completa
+        run: echo "✅ Infraestrutura AWS destruída com sucesso (bucket S3 de tfstate preservado e re-importado)"
