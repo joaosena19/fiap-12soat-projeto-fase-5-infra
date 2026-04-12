@@ -66,13 +66,13 @@ variable "eks_node_disk_size" {
 variable "eks_node_scaling_desired_size" {
   description = "Numero desejado de nos no grupo do EKS."
   type        = number
-  default     = 2
+  default     = 3
 }
 
 variable "eks_node_scaling_max_size" {
   description = "Numero maximo de nos no grupo do EKS."
   type        = number
-  default     = 3
+  default     = 4
 }
 
 variable "eks_node_scaling_min_size" {
