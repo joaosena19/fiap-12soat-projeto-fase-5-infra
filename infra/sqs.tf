@@ -6,7 +6,7 @@
 # Fila dedicada ao Processamento para consumo do topico upload-diagrama-concluido
 resource "aws_sqs_queue" "upload_diagrama_concluido_processamento" {
   name                       = var.sqs_upload_diagrama_concluido_processamento_name
-  visibility_timeout_seconds = 120
+  visibility_timeout_seconds = 600
   message_retention_seconds  = 86400
   receive_wait_time_seconds  = 20
 
