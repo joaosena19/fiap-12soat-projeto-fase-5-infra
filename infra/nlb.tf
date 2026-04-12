@@ -5,17 +5,17 @@ resource "aws_security_group" "nlb_sg" {
   vpc_id      = aws_vpc.vpc_principal.id
 
   ingress {
-    description = "HTTP de qualquer lugar"
-    from_port   = 80
-    to_port     = 80
+    description = "Upload API"
+    from_port   = 84
+    to_port     = 84
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
 
   ingress {
-    description = "HTTPS de qualquer lugar"
-    from_port   = 443
-    to_port     = 443
+    description = "Relatorio API"
+    from_port   = 86
+    to_port     = 86
     protocol    = "tcp"
     cidr_blocks = ["0.0.0.0/0"]
   }
@@ -36,7 +36,7 @@ resource "aws_security_group" "nlb_sg" {
 # Network Load Balancer para o EKS
 resource "aws_lb" "eks_nlb" {
   name               = "${var.project_identifier}-eks-nlb"
-  internal           = true
+  internal           = false
   load_balancer_type = "network"
   subnets            = aws_subnet.subnet_publica[*].id
 
@@ -141,8 +141,9 @@ resource "aws_security_group_rule" "allow_nlb_to_eks_nodes" {
   to_port     = 30086
   protocol    = "tcp"
 
-  # A origem e o Security Group do NLB
-  source_security_group_id = aws_security_group.nlb_sg.id
+  # NLB network preserva IP do cliente, SG source nao funciona.
+  # Usar CIDR aberto porque NLB internet-facing repassa IPs publicos dos clientes.
+  cidr_blocks = ["0.0.0.0/0"]
 
   # O destino e o Security Group automatico do Cluster EKS (onde os nos estao)
   security_group_id = aws_eks_cluster.eks_cluster.vpc_config[0].cluster_security_group_id
