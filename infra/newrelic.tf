@@ -33,7 +33,32 @@ resource "helm_release" "newrelic_bundle" {
     name  = "logging.enabled"
     value = "true"
   }
-  
+
+  # Corrige o output plugin do Fluent Bit v4.x: o plugin nativo 'newrelic' foi removido.
+  # Substitui por output 'http' apontando diretamente para a NR Log API.
+  values = [
+    <<-YAML
+    newrelic-logging:
+      fluentBit:
+        config:
+          outputs: |
+            [OUTPUT]
+                Name           http
+                Match          kube.*
+                Alias          newrelic-logs-forwarder
+                Host           log-api.newrelic.com
+                Port           443
+                URI            /log/v1
+                Format         json_lines
+                tls            On
+                tls.verify     On
+                Header         Api-Key $${LICENSE_KEY}
+                Header         Content-Type application/x-ndjson
+                compress       gzip
+                Retry_Limit    $${RETRY_LIMIT}
+    YAML
+  ]
+
   # Garante que so instala depois que os Nodes estiverem prontos
   depends_on = [
     aws_eks_node_group.eks_node_group
