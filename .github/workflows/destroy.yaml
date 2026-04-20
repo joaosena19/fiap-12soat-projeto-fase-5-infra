@@ -57,9 +57,23 @@ jobs:
 
       - name: Esvaziar bucket de uploads
         working-directory: ./infra
+        shell: bash
         run: |
+          set -euo pipefail
           echo "Esvaziando bucket de uploads..."
-          UPLOAD_BUCKET=$(terraform output -raw upload_bucket_name 2>/dev/null || echo "fiap-12soat-fase5-upload-diagramas")
+
+          # Try to read output; if it fails/empty, fall back to known default.
+          UPLOAD_BUCKET="$(terraform output -raw upload_bucket_name 2>/dev/null || true)"
+          if [[ -z "${UPLOAD_BUCKET}" ]]; then
+            UPLOAD_BUCKET="fiap-12soat-fase5-upload-diagramas"
+          fi
+
+          # Basic sanity check (avoid accidentally using Terraform warning text as bucket name)
+          if [[ ! "${UPLOAD_BUCKET}" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]; then
+            echo "Invalid upload bucket name resolved: '${UPLOAD_BUCKET}'. Skipping S3 cleanup."
+            exit 0
+          fi
+
           aws s3 rm "s3://${UPLOAD_BUCKET}" --recursive || true
 
       - name: Remover bucket tfstate do Terraform state
@@ -67,6 +81,25 @@ jobs:
         run: |
           echo "Removendo bucket de tfstate do Terraform state (não deleta da AWS)..."
           terraform state rm aws_s3_bucket.bucket_tfstate || true
+
+      - name: Configurar acesso ao cluster EKS (para destruir Helm releases)
+        shell: bash
+        run: |
+          if aws eks describe-cluster --name "$TF_VAR_eks_cluster_name" --region "$AWS_REGION" >/dev/null 2>&1; then
+            echo "Cluster acessível. Configurando kubeconfig..."
+            aws eks update-kubeconfig --name "$TF_VAR_eks_cluster_name" --region "$AWS_REGION"
+            echo "EKS_REACHABLE=true" >> "$GITHUB_ENV"
+          else
+            echo "Cluster não encontrado ou inacessível. Helm releases serão removidos do state."
+            echo "EKS_REACHABLE=false" >> "$GITHUB_ENV"
+          fi
+
+      - name: Remover recursos Helm/K8s do state (cluster inacessível)
+        if: env.EKS_REACHABLE == 'false'
+        working-directory: ./infra
+        shell: bash
+        run: |
+          terraform state rm helm_release.newrelic_bundle || true
 
       - name: Destruir todos os recursos
         working-directory: ./infra
