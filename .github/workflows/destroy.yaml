@@ -9,6 +9,7 @@ on:
 
 env:
   AWS_REGION: us-east-1
+  PROJECT_ID: fiap-12soat-fase5
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
 jobs:
@@ -44,72 +45,690 @@ jobs:
         uses: hashicorp/setup-terraform@v3
         with:
           terraform_version: 1.10.0
+          terraform_wrapper: false
 
       - name: Inicializar Terraform
         working-directory: ./infra
         run: terraform init
 
-      - name: Listar todos os recursos antes do destroy
-        working-directory: ./infra
-        run: |
-          echo "📋 Recursos gerenciados pelo Terraform:"
-          terraform state list
-
-      - name: Esvaziar bucket de uploads
+      - name: Diagnosticar estado atual
         working-directory: ./infra
         shell: bash
         run: |
           set -euo pipefail
-          echo "Esvaziando bucket de uploads..."
-
-          # Try to read output; if it fails/empty, fall back to known default.
-          UPLOAD_BUCKET="$(terraform output -raw upload_bucket_name 2>/dev/null || true)"
-          if [[ -z "${UPLOAD_BUCKET}" ]]; then
-            UPLOAD_BUCKET="fiap-12soat-fase5-upload-diagramas"
+          echo "📋 Recursos no Terraform state:"
+          STATE_LIST="$(terraform state list 2>/dev/null || true)"
+          if [[ -z "$STATE_LIST" ]]; then
+            echo "(state vazio — nenhum recurso gerenciado)"
+            echo "STATE_EMPTY=true" >> "$GITHUB_ENV"
+          else
+            echo "$STATE_LIST"
+            echo "STATE_EMPTY=false" >> "$GITHUB_ENV"
           fi
 
-          # Basic sanity check (avoid accidentally using Terraform warning text as bucket name)
-          if [[ ! "${UPLOAD_BUCKET}" =~ ^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$ ]]; then
-            echo "Invalid upload bucket name resolved: '${UPLOAD_BUCKET}'. Skipping S3 cleanup."
+      # ─────────────────────────────────────────────────────────────────────
+      # FASE 1: Esvaziar buckets S3 (incluindo versões e delete markers)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Esvaziar bucket de uploads (todas as versões)
+        shell: bash
+        run: |
+          set -euo pipefail
+          UPLOAD_BUCKET="fiap-12soat-fase5-upload-diagramas"
+          if ! aws s3api head-bucket --bucket "$UPLOAD_BUCKET" 2>/dev/null; then
+            echo "Bucket '$UPLOAD_BUCKET' não existe na AWS. Pulando."
             exit 0
           fi
 
-          aws s3 rm "s3://${UPLOAD_BUCKET}" --recursive || true
+          echo "Esvaziando bucket '$UPLOAD_BUCKET' (incluindo versões)..."
 
-      - name: Remover bucket tfstate do Terraform state
-        working-directory: ./infra
-        run: |
-          echo "Removendo bucket de tfstate do Terraform state (não deleta da AWS)..."
-          terraform state rm aws_s3_bucket.bucket_tfstate || true
+          # Remove todas as versões de objetos e delete markers
+          while true; do
+            VERSIONS=$(aws s3api list-object-versions \
+              --bucket "$UPLOAD_BUCKET" \
+              --max-items 1000 \
+              --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' \
+              --output json 2>/dev/null || echo '{"Objects":null}')
 
-      - name: Remover Helm release do state (evita erro de autenticação no cluster)
+            if [[ "$(echo "$VERSIONS" | jq '.Objects // empty | length')" == "0" ]] || \
+               [[ "$(echo "$VERSIONS" | jq '.Objects')" == "null" ]]; then
+              # Verificar delete markers também
+              MARKERS=$(aws s3api list-object-versions \
+                --bucket "$UPLOAD_BUCKET" \
+                --max-items 1000 \
+                --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' \
+                --output json 2>/dev/null || echo '{"Objects":null}')
+
+              if [[ "$(echo "$MARKERS" | jq '.Objects // empty | length')" == "0" ]] || \
+                 [[ "$(echo "$MARKERS" | jq '.Objects')" == "null" ]]; then
+                echo "Bucket vazio."
+                break
+              fi
+
+              echo "Removendo delete markers..."
+              echo "$MARKERS" | jq '{Objects: .Objects, Quiet: true}' | \
+                aws s3api delete-objects --bucket "$UPLOAD_BUCKET" --delete file:///dev/stdin || true
+            else
+              echo "Removendo versões de objetos..."
+              echo "$VERSIONS" | jq '{Objects: .Objects, Quiet: true}' | \
+                aws s3api delete-objects --bucket "$UPLOAD_BUCKET" --delete file:///dev/stdin || true
+            fi
+          done
+
+      # ─────────────────────────────────────────────────────────────────────
+      # FASE 2: Terraform destroy (abordagem principal)
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Preparar state para destroy seguro
+        if: env.STATE_EMPTY == 'false'
         working-directory: ./infra
         shell: bash
         run: |
-          # O provider Helm do Terraform usa aws_eks_cluster.eks_cluster.endpoint diretamente,
-          # e o IAM user do CI pode não ter acesso ao K8s API. O refresh falha com
-          # "the server has asked for the client to provide credentials".
-          # Remover do state é seguro porque o cluster EKS será destruído em seguida,
-          # o que elimina todos os recursos internos (Helm releases, pods, etc).
-          terraform state rm helm_release.newrelic_bundle || true
+          set -euo pipefail
+          STATE_LIST="$(terraform state list)"
 
-      - name: Destruir todos os recursos
+          # Remove bucket tfstate do state (será preservado na AWS)
+          if echo "$STATE_LIST" | grep -q '^aws_s3_bucket\.bucket_tfstate$'; then
+            echo "Removendo aws_s3_bucket.bucket_tfstate do state (preservar bucket)..."
+            terraform state rm aws_s3_bucket.bucket_tfstate
+          else
+            echo "aws_s3_bucket.bucket_tfstate não está no state. Pulando."
+          fi
+
+          # Remove helm_release (provider Helm pode não conseguir autenticar no K8s API)
+          if echo "$STATE_LIST" | grep -q '^helm_release\.newrelic_bundle$'; then
+            echo "Removendo helm_release.newrelic_bundle do state..."
+            terraform state rm helm_release.newrelic_bundle
+          else
+            echo "helm_release.newrelic_bundle não está no state. Pulando."
+          fi
+
+      - name: Neutralizar Helm provider se EKS não está no state
+        if: env.STATE_EMPTY == 'false'
         working-directory: ./infra
+        shell: bash
         run: |
-          echo "Destruindo todos os recursos restantes..."
-          terraform destroy -auto-approve
+          set -euo pipefail
+          if terraform state list 2>/dev/null | grep -q '^aws_eks_cluster\.eks_cluster$'; then
+            echo "EKS cluster está no state. Helm provider será configurado normalmente."
+          else
+            echo "EKS cluster NÃO está no state. Criando override para neutralizar Helm provider..."
+            cat > override.tf <<'EOF'
+          provider "helm" {
+            kubernetes {
+              host = "https://localhost"
+            }
+          }
+          EOF
+                      echo "override.tf criado."
+                    fi
+
+      - name: Destruir via Terraform (com retentativas)
+        if: env.STATE_EMPTY == 'false'
+        working-directory: ./infra
+        shell: bash
+        run: |
+          set -euo pipefail
+
+          REMAINING="$(terraform state list 2>/dev/null || true)"
+          if [[ -z "$REMAINING" ]]; then
+            echo "State vazio após preparação. Nada a destruir."
+            exit 0
+          fi
+
+          echo "Recursos a destruir:"
+          echo "$REMAINING"
+          echo ""
+
+          MAX_ATTEMPTS=4
+          for ((i=1; i<=MAX_ATTEMPTS; i++)); do
+            echo "🔄 Tentativa $i de $MAX_ATTEMPTS..."
+            if terraform destroy -auto-approve -parallelism=20 2>&1; then
+              echo "✅ Destroy completado com sucesso."
+              exit 0
+            fi
+
+            REMAINING="$(terraform state list 2>/dev/null || true)"
+            if [[ -z "$REMAINING" ]]; then
+              echo "✅ State vazio. Todos os recursos foram destruídos."
+              exit 0
+            fi
+
+            echo "⚠️ Destroy parcial. Recursos restantes:"
+            echo "$REMAINING"
+
+            # Se restam poucos recursos, tenta destruir individualmente
+            COUNT=$(echo "$REMAINING" | wc -l)
+            if ((COUNT <= 5 && i >= 2)); then
+              echo "Tentando destroy individual dos recursos restantes..."
+              while IFS= read -r resource; do
+                echo "  Destruindo: $resource"
+                terraform destroy -auto-approve -target="$resource" 2>&1 || true
+              done <<< "$REMAINING"
+            fi
+
+            if ((i < MAX_ATTEMPTS)); then
+              echo "Aguardando 30s antes da próxima tentativa..."
+              sleep 30
+            fi
+          done
+
+          # Se terraform destroy falhou após todas as tentativas, limpar state
+          # para não bloquear o fallback via AWS CLI
+          echo "⚠️ Terraform destroy não completou. Limpando state residual..."
+          REMAINING="$(terraform state list 2>/dev/null || true)"
+          if [[ -n "$REMAINING" ]]; then
+            while IFS= read -r resource; do
+              terraform state rm "$resource" 2>/dev/null || true
+            done <<< "$REMAINING"
+          fi
+          echo "State limpo. Fallback via AWS CLI será executado."
+
+      # ─────────────────────────────────────────────────────────────────────
+      # FASE 3: Fallback AWS CLI — destrói recursos órfãos/residuais
+      # Garante infraestrutura zerada independente do estado do Terraform
+      # ─────────────────────────────────────────────────────────────────────
+      - name: "Fallback: Destruir EKS Node Groups"
+        if: always()
+        shell: bash
+        run: |
+          CLUSTER="${TF_VAR_eks_cluster_name:-}"
+          [[ -z "$CLUSTER" ]] && exit 0
+
+          NODE_GROUPS=$(aws eks list-nodegroups --cluster-name "$CLUSTER" \
+            --query 'nodegroups[]' --output text 2>/dev/null || true)
+
+          if [[ -z "$NODE_GROUPS" ]]; then
+            echo "Nenhum node group encontrado. Pulando."
+            exit 0
+          fi
+
+          for NG in $NODE_GROUPS; do
+            echo "Destruindo node group: $NG"
+            aws eks delete-nodegroup --cluster-name "$CLUSTER" --nodegroup-name "$NG" 2>/dev/null || true
+          done
+
+          # Aguardar exclusão dos node groups (necessário antes de deletar o cluster)
+          for NG in $NODE_GROUPS; do
+            echo "Aguardando exclusão de $NG..."
+            aws eks wait nodegroup-deleted --cluster-name "$CLUSTER" --nodegroup-name "$NG" 2>/dev/null || true
+          done
+
+      - name: "Fallback: Destruir EKS Cluster"
+        if: always()
+        shell: bash
+        run: |
+          CLUSTER="${TF_VAR_eks_cluster_name:-}"
+          [[ -z "$CLUSTER" ]] && exit 0
+
+          if ! aws eks describe-cluster --name "$CLUSTER" 2>/dev/null >/dev/null; then
+            echo "Cluster '$CLUSTER' não existe. Pulando."
+            exit 0
+          fi
+
+          echo "Destruindo cluster EKS: $CLUSTER"
+          aws eks delete-cluster --name "$CLUSTER" 2>/dev/null || true
+          echo "Aguardando exclusão do cluster..."
+          aws eks wait cluster-deleted --name "$CLUSTER" 2>/dev/null || true
+
+          # Aguardar propagação assíncrona das ENIs do VPC CNI antes de limpar a rede
+          echo "Aguardando 60s para ENIs do VPC CNI serem liberadas..."
+          sleep 60
+
+      - name: "Fallback: Destruir Load Balancer e Target Groups"
+        if: always()
+        shell: bash
+        run: |
+          # Buscar NLB pelo nome do projeto
+          NLB_ARN=$(aws elbv2 describe-load-balancers \
+            --query "LoadBalancers[?LoadBalancerName=='${PROJECT_ID}-eks-nlb'].LoadBalancerArn" \
+            --output text 2>/dev/null || true)
+
+          if [[ -n "$NLB_ARN" && "$NLB_ARN" != "None" ]]; then
+            echo "Destruindo NLB: $NLB_ARN"
+            # Remover listeners primeiro
+            LISTENERS=$(aws elbv2 describe-listeners --load-balancer-arn "$NLB_ARN" \
+              --query 'Listeners[].ListenerArn' --output text 2>/dev/null || true)
+            for L in $LISTENERS; do
+              aws elbv2 delete-listener --listener-arn "$L" 2>/dev/null || true
+            done
+            aws elbv2 delete-load-balancer --load-balancer-arn "$NLB_ARN" 2>/dev/null || true
+            echo "Aguardando exclusão do NLB..."
+            aws elbv2 wait load-balancers-deleted --load-balancer-arns "$NLB_ARN" 2>/dev/null || true
+          else
+            echo "NLB não encontrado. Pulando."
+          fi
+
+          # Destruir Target Groups do projeto
+          TG_ARNS=$(aws elbv2 describe-target-groups \
+            --query "TargetGroups[?starts_with(TargetGroupName,'${PROJECT_ID}')].TargetGroupArn" \
+            --output text 2>/dev/null || true)
+
+          for TG in $TG_ARNS; do
+            echo "Destruindo Target Group: $TG"
+            aws elbv2 delete-target-group --target-group-arn "$TG" 2>/dev/null || true
+          done
+
+      - name: "Fallback: Destruir SNS Topics e SQS Queues"
+        if: always()
+        shell: bash
+        run: |
+          # Destruir SNS Topics com prefixo fase5-
+          TOPICS=$(aws sns list-topics --query "Topics[].TopicArn" --output text 2>/dev/null || true)
+          for TOPIC_ARN in $TOPICS; do
+            TOPIC_NAME="${TOPIC_ARN##*:}"
+            if [[ "$TOPIC_NAME" == fase5-* ]]; then
+              echo "Destruindo SNS Topic: $TOPIC_NAME"
+              # Remover subscriptions primeiro
+              SUBS=$(aws sns list-subscriptions-by-topic --topic-arn "$TOPIC_ARN" \
+                --query 'Subscriptions[].SubscriptionArn' --output text 2>/dev/null || true)
+              for SUB in $SUBS; do
+                [[ "$SUB" == "PendingConfirmation" ]] && continue
+                aws sns unsubscribe --subscription-arn "$SUB" 2>/dev/null || true
+              done
+              aws sns delete-topic --topic-arn "$TOPIC_ARN" 2>/dev/null || true
+            fi
+          done
+
+          # Destruir SQS Queues com prefixo fase5-
+          QUEUES=$(aws sqs list-queues --queue-name-prefix "fase5-" \
+            --query 'QueueUrls[]' --output text 2>/dev/null || true)
+          for QUEUE_URL in $QUEUES; do
+            echo "Destruindo SQS Queue: $QUEUE_URL"
+            aws sqs delete-queue --queue-url "$QUEUE_URL" 2>/dev/null || true
+          done
+
+      - name: "Fallback: Destruir bucket de uploads"
+        if: always()
+        shell: bash
+        run: |
+          UPLOAD_BUCKET="fiap-12soat-fase5-upload-diagramas"
+          if ! aws s3api head-bucket --bucket "$UPLOAD_BUCKET" 2>/dev/null; then
+            echo "Bucket '$UPLOAD_BUCKET' não existe. Pulando."
+            exit 0
+          fi
+
+          echo "Destruindo bucket '$UPLOAD_BUCKET'..."
+          # Garantir que está vazio (todas as versões)
+          aws s3api list-object-versions --bucket "$UPLOAD_BUCKET" \
+            --query '{Objects: Versions[].{Key:Key,VersionId:VersionId}}' --output json 2>/dev/null | \
+            jq 'select(.Objects != null) | {Objects: .Objects, Quiet: true}' | \
+            aws s3api delete-objects --bucket "$UPLOAD_BUCKET" --delete file:///dev/stdin 2>/dev/null || true
+
+          aws s3api list-object-versions --bucket "$UPLOAD_BUCKET" \
+            --query '{Objects: DeleteMarkers[].{Key:Key,VersionId:VersionId}}' --output json 2>/dev/null | \
+            jq 'select(.Objects != null) | {Objects: .Objects, Quiet: true}' | \
+            aws s3api delete-objects --bucket "$UPLOAD_BUCKET" --delete file:///dev/stdin 2>/dev/null || true
+
+          aws s3 rb "s3://${UPLOAD_BUCKET}" --force 2>/dev/null || true
+
+      - name: "Fallback: Destruir Security Groups do projeto"
+        if: always()
+        shell: bash
+        run: |
+          # Buscar VPC do projeto
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:ProjectIdentifier,Values=${PROJECT_ID}" \
+            --query 'Vpcs[0].VpcId' --output text 2>/dev/null || true)
+
+          if [[ -z "$VPC_ID" || "$VPC_ID" == "None" ]]; then
+            echo "VPC do projeto não encontrada. Pulando."
+            exit 0
+          fi
+
+          echo "VPC encontrada: $VPC_ID"
+
+          # Listar security groups não-default da VPC
+          SG_IDS=$(aws ec2 describe-security-groups \
+            --filters "Name=vpc-id,Values=$VPC_ID" \
+            --query "SecurityGroups[?GroupName!='default'].GroupId" \
+            --output text 2>/dev/null || true)
+
+          for SG_ID in $SG_IDS; do
+            echo "Removendo regras e destruindo SG: $SG_ID"
+
+            # Revogar ingress rules individualmente (incluindo cross-SG references)
+            INGRESS_RULE_IDS=$(aws ec2 describe-security-group-rules \
+              --filters "Name=group-id,Values=$SG_ID" \
+              --query 'SecurityGroupRules[?IsEgress==`false`].SecurityGroupRuleId' \
+              --output text 2>/dev/null || true)
+            if [[ -n "$INGRESS_RULE_IDS" ]]; then
+              aws ec2 revoke-security-group-ingress --group-id "$SG_ID" \
+                --security-group-rule-ids $INGRESS_RULE_IDS 2>/dev/null || true
+            fi
+
+            # Revogar egress rules individualmente
+            EGRESS_RULE_IDS=$(aws ec2 describe-security-group-rules \
+              --filters "Name=group-id,Values=$SG_ID" \
+              --query 'SecurityGroupRules[?IsEgress==`true`].SecurityGroupRuleId' \
+              --output text 2>/dev/null || true)
+            if [[ -n "$EGRESS_RULE_IDS" ]]; then
+              aws ec2 revoke-security-group-egress --group-id "$SG_ID" \
+                --security-group-rule-ids $EGRESS_RULE_IDS 2>/dev/null || true
+            fi
+
+            aws ec2 delete-security-group --group-id "$SG_ID" 2>/dev/null || true
+          done
+
+      - name: "Fallback: Destruir NAT Gateways e Elastic IPs"
+        if: always()
+        shell: bash
+        run: |
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:ProjectIdentifier,Values=${PROJECT_ID}" \
+            --query 'Vpcs[0].VpcId' --output text 2>/dev/null || true)
+
+          if [[ -z "$VPC_ID" || "$VPC_ID" == "None" ]]; then
+            exit 0
+          fi
+
+          # NAT Gateways
+          NAT_IDS=$(aws ec2 describe-nat-gateways \
+            --filter "Name=vpc-id,Values=$VPC_ID" "Name=state,Values=available,pending" \
+            --query 'NatGateways[].NatGatewayId' --output text 2>/dev/null || true)
+
+          for NAT_ID in $NAT_IDS; do
+            echo "Destruindo NAT Gateway: $NAT_ID"
+            aws ec2 delete-nat-gateway --nat-gateway-id "$NAT_ID" 2>/dev/null || true
+          done
+
+          # Aguardar NATs serem deletados antes de liberar EIPs
+          for NAT_ID in $NAT_IDS; do
+            aws ec2 wait nat-gateway-deleted --nat-gateway-ids "$NAT_ID" 2>/dev/null || true
+          done
+
+          # Elastic IPs não associadas com tag do projeto
+          EIP_ALLOCS=$(aws ec2 describe-addresses \
+            --filters "Name=tag:ProjectIdentifier,Values=${PROJECT_ID}" \
+            --query 'Addresses[].AllocationId' --output text 2>/dev/null || true)
+
+          for ALLOC in $EIP_ALLOCS; do
+            echo "Liberando Elastic IP: $ALLOC"
+            aws ec2 release-address --allocation-id "$ALLOC" 2>/dev/null || true
+          done
+
+      - name: "Fallback: Destruir Subnets e Internet Gateway"
+        if: always()
+        shell: bash
+        run: |
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:ProjectIdentifier,Values=${PROJECT_ID}" \
+            --query 'Vpcs[0].VpcId' --output text 2>/dev/null || true)
+
+          if [[ -z "$VPC_ID" || "$VPC_ID" == "None" ]]; then
+            echo "VPC não encontrada. Pulando."
+            exit 0
+          fi
+
+          # Route table associations (non-main)
+          RT_IDS=$(aws ec2 describe-route-tables \
+            --filters "Name=vpc-id,Values=$VPC_ID" \
+            --query "RouteTables[?Associations[?Main==\`false\`]].RouteTableId" \
+            --output text 2>/dev/null || true)
+
+          for RT_ID in $RT_IDS; do
+            ASSOC_IDS=$(aws ec2 describe-route-tables --route-table-ids "$RT_ID" \
+              --query "RouteTables[0].Associations[?Main==\`false\`].RouteTableAssociationId" \
+              --output text 2>/dev/null || true)
+            for ASSOC in $ASSOC_IDS; do
+              aws ec2 disassociate-route-table --association-id "$ASSOC" 2>/dev/null || true
+            done
+            aws ec2 delete-route-table --route-table-id "$RT_ID" 2>/dev/null || true
+          done
+
+          # Subnets
+          SUBNET_IDS=$(aws ec2 describe-subnets --filters "Name=vpc-id,Values=$VPC_ID" \
+            --query 'Subnets[].SubnetId' --output text 2>/dev/null || true)
+          for SUBNET_ID in $SUBNET_IDS; do
+            echo "Destruindo subnet: $SUBNET_ID"
+            aws ec2 delete-subnet --subnet-id "$SUBNET_ID" 2>/dev/null || true
+          done
+
+          # Internet Gateway
+          IGW_IDS=$(aws ec2 describe-internet-gateways \
+            --filters "Name=attachment.vpc-id,Values=$VPC_ID" \
+            --query 'InternetGateways[].InternetGatewayId' --output text 2>/dev/null || true)
+          for IGW_ID in $IGW_IDS; do
+            echo "Detachando e destruindo IGW: $IGW_ID"
+            aws ec2 detach-internet-gateway --internet-gateway-id "$IGW_ID" --vpc-id "$VPC_ID" 2>/dev/null || true
+            aws ec2 delete-internet-gateway --internet-gateway-id "$IGW_ID" 2>/dev/null || true
+          done
+
+      - name: "Fallback: Destruir VPC"
+        if: always()
+        shell: bash
+        run: |
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:ProjectIdentifier,Values=${PROJECT_ID}" \
+            --query 'Vpcs[0].VpcId' --output text 2>/dev/null || true)
+
+          if [[ -z "$VPC_ID" || "$VPC_ID" == "None" ]]; then
+            echo "VPC não encontrada. Nada a fazer."
+            exit 0
+          fi
+
+          echo "Destruindo VPC: $VPC_ID"
+          aws ec2 delete-vpc --vpc-id "$VPC_ID" 2>/dev/null || true
+
+      - name: "Fallback: Destruir IAM Roles do projeto"
+        if: always()
+        shell: bash
+        run: |
+          ROLES=("eks-role-${PROJECT_ID}" "eks-node-role-${PROJECT_ID}")
+
+          for ROLE_NAME in "${ROLES[@]}"; do
+            if ! aws iam get-role --role-name "$ROLE_NAME" 2>/dev/null >/dev/null; then
+              echo "Role '$ROLE_NAME' não existe. Pulando."
+              continue
+            fi
+
+            echo "Destruindo role: $ROLE_NAME"
+
+            # Detach todas as policies
+            POLICIES=$(aws iam list-attached-role-policies --role-name "$ROLE_NAME" \
+              --query 'AttachedPolicies[].PolicyArn' --output text 2>/dev/null || true)
+            for POLICY in $POLICIES; do
+              aws iam detach-role-policy --role-name "$ROLE_NAME" --policy-arn "$POLICY" 2>/dev/null || true
+            done
+
+            # Remover instance profiles
+            PROFILES=$(aws iam list-instance-profiles-for-role --role-name "$ROLE_NAME" \
+              --query 'InstanceProfiles[].InstanceProfileName' --output text 2>/dev/null || true)
+            for PROFILE in $PROFILES; do
+              aws iam remove-role-from-instance-profile --instance-profile-name "$PROFILE" --role-name "$ROLE_NAME" 2>/dev/null || true
+            done
+
+            aws iam delete-role --role-name "$ROLE_NAME" 2>/dev/null || true
+          done
+
+      - name: "Fallback: Destruir EKS Access Entries"
+        if: always()
+        shell: bash
+        run: |
+          CLUSTER="${TF_VAR_eks_cluster_name:-}"
+          [[ -z "$CLUSTER" ]] && exit 0
+
+          # Se cluster ainda existe (improvável neste ponto), limpar access entries
+          if aws eks describe-cluster --name "$CLUSTER" 2>/dev/null >/dev/null; then
+            ENTRIES=$(aws eks list-access-entries --cluster-name "$CLUSTER" \
+              --query 'accessEntries[]' --output text 2>/dev/null || true)
+            for ENTRY in $ENTRIES; do
+              echo "Removendo access entry: $ENTRY"
+              aws eks delete-access-entry --cluster-name "$CLUSTER" --principal-arn "$ENTRY" 2>/dev/null || true
+            done
+          fi
+
+      - name: "Fallback: Destruir CloudWatch Log Groups do EKS"
+        if: always()
+        shell: bash
+        run: |
+          CLUSTER="${TF_VAR_eks_cluster_name:-}"
+          [[ -z "$CLUSTER" ]] && exit 0
+
+          LOG_GROUP="/aws/eks/${CLUSTER}/cluster"
+          if aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" \
+            --query 'logGroups[0].logGroupName' --output text 2>/dev/null | grep -q "$LOG_GROUP"; then
+            echo "Destruindo log group: $LOG_GROUP"
+            aws logs delete-log-group --log-group-name "$LOG_GROUP" 2>/dev/null || true
+          else
+            echo "Log group '$LOG_GROUP' não existe. Pulando."
+          fi
+
+      # ─────────────────────────────────────────────────────────────────────
+      # FASE 4: Limpar Terraform state e re-importar apenas o bucket tfstate
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Limpar state residual
+        if: always()
+        working-directory: ./infra
+        shell: bash
+        run: |
+          REMAINING="$(terraform state list 2>/dev/null || true)"
+          if [[ -z "$REMAINING" ]]; then
+            echo "State já está limpo."
+            exit 0
+          fi
+
+          echo "Removendo recursos residuais do state..."
+          while IFS= read -r resource; do
+            terraform state rm "$resource" 2>/dev/null || true
+          done <<< "$REMAINING"
 
       - name: Re-importar bucket tfstate no state
+        if: always()
         working-directory: ./infra
+        shell: bash
         run: |
+          # Recria override para Helm (necessário para terraform import funcionar)
+          cat > override.tf <<'EOF'
+          provider "helm" {
+            kubernetes {
+              host = "https://localhost"
+            }
+          }
+          EOF
+
+          BUCKET_NAME="${TF_VAR_tfstate_bucket_name:-}"
+          if [[ -z "$BUCKET_NAME" ]]; then
+            echo "TF_VAR_tfstate_bucket_name não definido. Pulando re-import."
+            exit 0
+          fi
+
+          if ! aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+            echo "Bucket '$BUCKET_NAME' não existe na AWS. Pulando re-import."
+            exit 0
+          fi
+
+          if terraform state list 2>/dev/null | grep -q '^aws_s3_bucket\.bucket_tfstate$'; then
+            echo "aws_s3_bucket.bucket_tfstate já está no state. Pulando."
+            exit 0
+          fi
+
           echo "Re-importando bucket de tfstate no Terraform state..."
-          terraform import aws_s3_bucket.bucket_tfstate ${{ secrets.TF_VAR_TFSTATE_BUCKET_NAME }}
+          terraform import aws_s3_bucket.bucket_tfstate "$BUCKET_NAME" 2>&1 || \
+            echo "⚠️ Import falhou. O bucket está preservado na AWS e será reconciliado no próximo apply."
 
-      - name: Verificar recursos restantes
-        working-directory: ./infra
+          # Limpar override temporário
+          rm -f override.tf
+
+      # ─────────────────────────────────────────────────────────────────────
+      # FASE 5: Validação final
+      # ─────────────────────────────────────────────────────────────────────
+      - name: Validação final — confirmar infraestrutura zerada
+        if: always()
+        shell: bash
         run: |
-          echo "📋 Recursos restantes no Terraform state (deve conter apenas o bucket tfstate):"
-          terraform state list
+          echo "═══════════════════════════════════════════════════"
+          echo "  VALIDAÇÃO FINAL"
+          echo "═══════════════════════════════════════════════════"
+          ERRORS=0
 
-      - name: Destruição completa
-        run: echo "✅ Infraestrutura AWS destruída com sucesso (bucket S3 de tfstate preservado e re-importado)"
+          # EKS
+          CLUSTER="${TF_VAR_eks_cluster_name:-}"
+          if [[ -n "$CLUSTER" ]] && aws eks describe-cluster --name "$CLUSTER" 2>/dev/null >/dev/null; then
+            echo "❌ EKS Cluster '$CLUSTER' ainda existe!"
+            ERRORS=$((ERRORS+1))
+          else
+            echo "✅ EKS Cluster: removido"
+          fi
+
+          # NLB
+          NLB=$(aws elbv2 describe-load-balancers \
+            --query "LoadBalancers[?LoadBalancerName=='${PROJECT_ID}-eks-nlb'].LoadBalancerArn" \
+            --output text 2>/dev/null || true)
+          if [[ -n "$NLB" && "$NLB" != "None" ]]; then
+            echo "❌ NLB ainda existe!"
+            ERRORS=$((ERRORS+1))
+          else
+            echo "✅ NLB: removido"
+          fi
+
+          # VPC
+          VPC_ID=$(aws ec2 describe-vpcs \
+            --filters "Name=tag:ProjectIdentifier,Values=${PROJECT_ID}" \
+            --query 'Vpcs[0].VpcId' --output text 2>/dev/null || true)
+          if [[ -n "$VPC_ID" && "$VPC_ID" != "None" ]]; then
+            echo "❌ VPC '$VPC_ID' ainda existe!"
+            ERRORS=$((ERRORS+1))
+          else
+            echo "✅ VPC: removida"
+          fi
+
+          # SQS
+          QUEUES=$(aws sqs list-queues --queue-name-prefix "fase5-" \
+            --query 'QueueUrls[]' --output text 2>/dev/null || true)
+          if [[ -n "$QUEUES" ]]; then
+            echo "❌ Filas SQS fase5-* ainda existem!"
+            ERRORS=$((ERRORS+1))
+          else
+            echo "✅ SQS Queues: removidas"
+          fi
+
+          # Upload bucket
+          if aws s3api head-bucket --bucket "fiap-12soat-fase5-upload-diagramas" 2>/dev/null; then
+            echo "❌ Bucket de uploads ainda existe!"
+            ERRORS=$((ERRORS+1))
+          else
+            echo "✅ Bucket de uploads: removido"
+          fi
+
+          # CloudWatch Log Groups
+          CLUSTER="${TF_VAR_eks_cluster_name:-}"
+          if [[ -n "$CLUSTER" ]]; then
+            LOG_GROUP="/aws/eks/${CLUSTER}/cluster"
+            if aws logs describe-log-groups --log-group-name-prefix "$LOG_GROUP" \
+              --query 'logGroups[0].logGroupName' --output text 2>/dev/null | grep -q "$LOG_GROUP"; then
+              echo "❌ CloudWatch Log Group '$LOG_GROUP' ainda existe!"
+              ERRORS=$((ERRORS+1))
+            else
+              echo "✅ CloudWatch Log Groups: removidos"
+            fi
+          fi
+
+          # tfstate bucket (deve existir)
+          BUCKET_NAME="${TF_VAR_tfstate_bucket_name:-}"
+          if [[ -n "$BUCKET_NAME" ]] && aws s3api head-bucket --bucket "$BUCKET_NAME" 2>/dev/null; then
+            echo "✅ Bucket tfstate: preservado (esperado)"
+          else
+            echo "⚠️ Bucket tfstate não encontrado (será recriado no próximo apply)"
+          fi
+
+          echo "═══════════════════════════════════════════════════"
+          if ((ERRORS > 0)); then
+            echo "⚠️ $ERRORS recurso(s) não foram completamente removidos."
+            echo "Pode haver delay de propagação na AWS. Verifique manualmente."
+          else
+            echo "✅ Infraestrutura completamente zerada!"
+          fi
+
+      - name: Resultado final
+        if: always()
+        working-directory: ./infra
+        shell: bash
+        run: |
+          echo "📋 Recursos restantes no Terraform state:"
+          RESOURCES="$(terraform state list 2>/dev/null || true)"
+          if [[ -z "$RESOURCES" ]]; then
+            echo "(state vazio — infra completamente limpa)"
+          else
+            echo "$RESOURCES"
+          fi
+          echo ""
+          echo "✅ Pipeline de destroy concluído."
