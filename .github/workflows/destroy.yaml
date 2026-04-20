@@ -82,23 +82,15 @@ jobs:
           echo "Removendo bucket de tfstate do Terraform state (não deleta da AWS)..."
           terraform state rm aws_s3_bucket.bucket_tfstate || true
 
-      - name: Configurar acesso ao cluster EKS (para destruir Helm releases)
-        shell: bash
-        run: |
-          if aws eks describe-cluster --name "$TF_VAR_eks_cluster_name" --region "$AWS_REGION" >/dev/null 2>&1; then
-            echo "Cluster acessível. Configurando kubeconfig..."
-            aws eks update-kubeconfig --name "$TF_VAR_eks_cluster_name" --region "$AWS_REGION"
-            echo "EKS_REACHABLE=true" >> "$GITHUB_ENV"
-          else
-            echo "Cluster não encontrado ou inacessível. Helm releases serão removidos do state."
-            echo "EKS_REACHABLE=false" >> "$GITHUB_ENV"
-          fi
-
-      - name: Remover recursos Helm/K8s do state (cluster inacessível)
-        if: env.EKS_REACHABLE == 'false'
+      - name: Remover Helm release do state (evita erro de autenticação no cluster)
         working-directory: ./infra
         shell: bash
         run: |
+          # O provider Helm do Terraform usa aws_eks_cluster.eks_cluster.endpoint diretamente,
+          # e o IAM user do CI pode não ter acesso ao K8s API. O refresh falha com
+          # "the server has asked for the client to provide credentials".
+          # Remover do state é seguro porque o cluster EKS será destruído em seguida,
+          # o que elimina todos os recursos internos (Helm releases, pods, etc).
           terraform state rm helm_release.newrelic_bundle || true
 
       - name: Destruir todos os recursos
